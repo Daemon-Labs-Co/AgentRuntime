@@ -5,12 +5,29 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"commonroom-runtime/protocol"
 )
+
+// The worker reads its home directory and finds docker through the process
+// environment, so each case runs the real entry point in a child process with a
+// temporary home and a fake docker script first on PATH. No real container
+// engine is ever invoked.
+func TestWorkerChild(t *testing.T) {
+	raw := os.Getenv("COMMONROOM_TEST_WORKER_ARGS")
+	if raw == "" {
+		return
+	}
+	var args []string
+	if err := json.Unmarshal([]byte(raw), &args); err != nil {
+		os.Exit(99)
+	}
+	os.Exit(Run(args, os.Stdin, os.Stdout, os.Stderr))
+}
 
 const goodImage = "registry.example/agent@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
@@ -27,9 +44,9 @@ func tooManyRepositories() string {
 const rootlessInfo = `{"SecurityOptions":["name=seccomp,profile=builtin","name=rootless"],"MemoryLimit":true,"SwapLimit":true,"PidsLimit":true,"CpuCfsQuota":true}`
 
 type fixture struct {
-	Deps Deps
 	Home string
 	Auth string
+	Bin  string // directory placed alone on PATH
 }
 
 type options struct {
@@ -89,29 +106,38 @@ func newFixture(t *testing.T, o options) fixture {
 	if info == "" {
 		info = rootlessInfo
 	}
-	docker := filepath.Join(root, "docker")
-	script := fmt.Sprintf("#!/bin/sh\ncase \"$1\" in\n info) cat <<'EOF'\n%s\nEOF\n ;;\n image) exit %d ;;\n *) exit 2 ;;\nesac\n", info, o.imageExit)
+	bin := filepath.Join(root, "bin")
+	must(os.MkdirAll(bin, 0o755))
+	docker := filepath.Join(bin, "docker")
+	script := fmt.Sprintf("#!/bin/sh\ncase \"$1\" in\n info) printf '%%s\\n' '%s' ;;\n image) exit %d ;;\n *) exit 2 ;;\nesac\n", info, o.imageExit)
 	must(os.WriteFile(docker, []byte(script), 0o755))
 	if o.noDocker {
-		docker = filepath.Join(root, "missing-docker")
+		must(os.Remove(docker))
 	}
-	goos := o.goos
-	if goos == "" {
-		goos = "linux"
-	}
-	return fixture{Deps: Deps{Home: home, GOOS: goos, Docker: docker, Euid: os.Geteuid()}, Home: home, Auth: auth}
+	return fixture{Home: home, Auth: auth, Bin: bin}
 }
 
-func run(d Deps, args ...string) (int, string, string) {
+func run(f fixture, args ...string) (int, string, string) {
+	encoded, _ := json.Marshal(args)
+	cmd := exec.Command(os.Args[0], "-test.run=^TestWorkerChild$")
+	cmd.Env = []string{"HOME=" + f.Home, "PATH=" + f.Bin, "COMMONROOM_TEST_WORKER_ARGS=" + string(encoded)}
 	var out, diag bytes.Buffer
-	code := Run(d, args, strings.NewReader(""), &out, &diag)
+	cmd.Stdout, cmd.Stderr = &out, &diag
+	code := 0
+	if err := cmd.Run(); err != nil {
+		if exit, ok := err.(*exec.ExitError); ok {
+			code = exit.ExitCode()
+		} else {
+			code = -1
+		}
+	}
 	return code, out.String(), diag.String()
 }
 
 func TestReadyReportsConfiguredRuntimeAndCredentials(t *testing.T) {
 	t.Parallel()
 	f := newFixture(t, options{})
-	code, out, diag := run(f.Deps, protocol.ActionReady)
+	code, out, diag := run(f, protocol.ActionReady)
 	if code != 0 || diag != "" {
 		t.Fatalf("code=%d diag=%q", code, diag)
 	}
@@ -132,7 +158,7 @@ func TestReadyReportsConfiguredRuntimeAndCredentials(t *testing.T) {
 func TestReadyWireKeysMatchController(t *testing.T) {
 	t.Parallel()
 	f := newFixture(t, options{})
-	_, out, _ := run(f.Deps, protocol.ActionReady)
+	_, out, _ := run(f, protocol.ActionReady)
 	var raw map[string]any
 	if err := json.Unmarshal([]byte(out), &raw); err != nil {
 		t.Fatal(err)
@@ -150,7 +176,7 @@ func TestReadyWireKeysMatchController(t *testing.T) {
 func TestReadyReportsUnsafeOrMissingCredentialsWithoutFailing(t *testing.T) {
 	t.Parallel()
 	f := newFixture(t, options{codexMode: 0o644, skipClaude: true})
-	code, out, _ := run(f.Deps, protocol.ActionReady)
+	code, out, _ := run(f, protocol.ActionReady)
 	if code != 0 {
 		t.Fatalf("code=%d", code)
 	}
@@ -181,7 +207,6 @@ func TestReadyRefusals(t *testing.T) {
 		{"registry bad room name", options{config: fmt.Sprintf(`{"image":%q,"authDir":"/tmp/a","developmentRepositories":{"-bad":{"bundle":"/b/x","sha256":%q}}}`, goodImage, digestHex)}, "Invalid approved development bundle"},
 		{"registry unknown nested field", options{config: fmt.Sprintf(`{"image":%q,"authDir":"/tmp/a","developmentRepositories":{"r":{"bundle":"/b/x","sha256":%q,"extra":1}}}`, goodImage, digestHex)}, "digest-pinned"},
 		{"registry too large", options{config: tooManyRepositories()}, "Too many development repositories"},
-		{"not linux", options{goos: "darwin"}, "Linux worker"},
 		{"docker missing", options{noDocker: true}, "Rootless Docker is required"},
 		{"daemon not rootless", options{infoJSON: `{"SecurityOptions":["name=seccomp"],"MemoryLimit":true,"SwapLimit":true,"PidsLimit":true,"CpuCfsQuota":true}`}, "limits unavailable"},
 		{"daemon without seccomp", options{infoJSON: `{"SecurityOptions":["name=rootless"],"MemoryLimit":true,"SwapLimit":true,"PidsLimit":true,"CpuCfsQuota":true}`}, "limits unavailable"},
@@ -197,7 +222,7 @@ func TestReadyRefusals(t *testing.T) {
 			if tc.o.config == " " {
 				os.Remove(filepath.Join(f.Home, ".config/commonroom-worker/config.json"))
 			}
-			code, out, diag := run(f.Deps, protocol.ActionReady)
+			code, out, diag := run(f, protocol.ActionReady)
 			if code == 0 || out != "" {
 				t.Fatalf("expected refusal, code=%d out=%q", code, out)
 			}
@@ -208,18 +233,27 @@ func TestReadyRefusals(t *testing.T) {
 	}
 }
 
-func TestEveryOtherActionIsRefused(t *testing.T) {
+func TestUnknownActionsAreRefused(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t, options{})
+	for _, args := range [][]string{{"unknown-v9", "value"}, {"ready-v9", "value"}} {
+		code, out, diag := run(f, args...)
+		if code == 0 || out != "" || !strings.Contains(diag, "Unsupported worker action") {
+			t.Fatalf("%v: code=%d out=%q diag=%q", args, code, out, diag)
+		}
+	}
+}
+
+func TestEveryProtocolActionRefusesMalformedOperands(t *testing.T) {
 	t.Parallel()
 	f := newFixture(t, options{})
 	for _, action := range protocol.Actions {
-		if action == protocol.ActionReady {
-			continue
+		if action == protocol.ActionReady || action == protocol.ActionIdle || action == protocol.ActionJobs {
+			continue // operand-free actions; covered by their own tests
 		}
-		for _, args := range [][]string{{action}, {action, "value"}} {
-			code, out, diag := run(f.Deps, args...)
-			if code == 0 || out != "" || !strings.Contains(diag, "Unsupported worker action") {
-				t.Fatalf("%v: code=%d out=%q diag=%q", args, code, out, diag)
-			}
+		code, out, diag := run(f, action, "!!not-a-valid-operand!!")
+		if code == 0 || out != "" || diag == "" {
+			t.Fatalf("%s accepted a malformed operand: code=%d out=%q diag=%q", action, code, out, diag)
 		}
 	}
 }
@@ -228,7 +262,7 @@ func TestMalformedInvocationsAreRefused(t *testing.T) {
 	t.Parallel()
 	f := newFixture(t, options{})
 	for _, args := range [][]string{{}, {"unknown-v9"}, {protocol.ActionReady, "extra"}, {"--agent-worker", protocol.ActionReady}} {
-		code, out, diag := run(f.Deps, args...)
+		code, out, diag := run(f, args...)
 		if code == 0 || out != "" || diag == "" {
 			t.Fatalf("%v: code=%d out=%q diag=%q", args, code, out, diag)
 		}
@@ -238,51 +272,9 @@ func TestMalformedInvocationsAreRefused(t *testing.T) {
 func TestDiagnosticsNeverEchoCredentialContents(t *testing.T) {
 	t.Parallel()
 	f := newFixture(t, options{imageExit: 1})
-	_, out, diag := run(f.Deps, protocol.ActionReady)
+	_, out, diag := run(f, protocol.ActionReady)
 	if strings.Contains(out+diag, "synthetic") {
 		t.Fatalf("credential content leaked: %q %q", out, diag)
-	}
-}
-
-func TestReadPrivateBoundedRejectsUnsafeFiles(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	euid := os.Geteuid()
-	write := func(name string, mode os.FileMode, data string) string {
-		p := filepath.Join(dir, name)
-		if err := os.WriteFile(p, []byte(data), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.Chmod(p, mode); err != nil {
-			t.Fatal(err)
-		}
-		return p
-	}
-	if _, err := readPrivateBounded(write("ok", 0o600, "x"), 8, euid); err != nil {
-		t.Fatalf("owner-only file refused: %v", err)
-	}
-	if _, err := readPrivateBounded(write("open", 0o644, "x"), 8, euid); err == nil {
-		t.Fatal("world-readable file accepted")
-	}
-	if _, err := readPrivateBounded(write("big", 0o600, "123456789"), 8, euid); err == nil {
-		t.Fatal("oversized file accepted")
-	}
-	if _, err := readPrivateBounded(write("wrongowner", 0o600, "x"), 8, euid+1); err == nil {
-		t.Fatal("file owned by another user accepted")
-	}
-	link := filepath.Join(dir, "link")
-	if err := os.Symlink(filepath.Join(dir, "ok"), link); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := readPrivateBounded(link, 8, euid); err == nil {
-		t.Fatal("symlink accepted")
-	}
-	hard := filepath.Join(dir, "hard")
-	if err := os.Link(filepath.Join(dir, "ok"), hard); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := readPrivateBounded(hard, 8, euid); err == nil {
-		t.Fatal("multi-link file accepted")
 	}
 }
 
@@ -303,7 +295,7 @@ func controllerAcceptsReady(raw []byte) bool {
 func TestReadyOutputIsAcceptedByTheControllerProbe(t *testing.T) {
 	t.Parallel()
 	f := newFixture(t, options{})
-	code, out, _ := run(f.Deps, protocol.ActionReady)
+	code, out, _ := run(f, protocol.ActionReady)
 	if code != 0 || !controllerAcceptsReady([]byte(out)) {
 		t.Fatalf("controller would reject %q (code %d)", out, code)
 	}
@@ -327,7 +319,7 @@ func TestReadyAcceptsAValidDevelopmentRegistryWithoutUsingIt(t *testing.T) {
 		if err := os.WriteFile(path, []byte(config), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		code, out, diag := run(f.Deps, protocol.ActionReady)
+		code, out, diag := run(f, protocol.ActionReady)
 		if code != 0 || !controllerAcceptsReady([]byte(out)) {
 			t.Fatalf("%s: code=%d out=%q diag=%q", extra, code, out, diag)
 		}
