@@ -374,7 +374,9 @@ else
   say "1. An allowed action (ready-v1) must return the worker's JSON:"
   as_controller ssh -T "$ALIAS" "exec ~/.local/bin/commonroom-worker ready-v1" </dev/null && note "ok" || warn "ready-v1 failed (see the message above)"
   say "2. A plain command must be refused:"
-  if as_controller ssh -T "$ALIAS" id </dev/null 2>&1 | grep -q 'Forbidden worker command'; then note "ok: refused"; else warn "NOT refused as expected; remove the authorized_keys line and investigate"; fi
+  # Capture first: under pipefail a refused command's nonzero exit would fail a pipeline.
+  refusal=$(as_controller ssh -T "$ALIAS" id </dev/null 2>&1 || true)
+  if [[ "$refusal" == *"Forbidden worker command"* ]]; then note "ok: refused"; else warn "NOT refused as expected; remove the authorized_keys line and investigate"; fi
 fi
 say ""
 say "Controller service environment (edit your environment file, then restart the service):"
