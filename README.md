@@ -47,6 +47,21 @@ Verified against a real sshd with a throwaway key: valid commands run, chained
 commands, plain shells and interactive sessions are refused. Port-forwarding
 refusal is documented by `restrict` but was not observed.
 
+## Host setup (administrator)
+
+Both scripts live in `deploy/`, check before they change anything, ask before
+replacing a file, keep timestamped backups, and accept `--dry-run`:
+
+- `deploy/host-space-setup.sh`: group, state and socket directories, a systemd
+  unit (installed, not enabled; its `DOCKER_HOST` line must be removed before it is
+  ever used, because the worker refuses that variable) and a restricted sudo rule.
+- `deploy/host-ssh-setup.sh`: a controller key, the forced-command line in the
+  worker account's `authorized_keys`, the pinned host key (compared with the key on
+  disk, no trust-on-first-use) and the SSH alias, then a live check as the
+  controller account that an allowed action works and a plain command is refused.
+
+Run them from an administrator account. They are not run by automated tests.
+
 ## Use
 
 ```bash
