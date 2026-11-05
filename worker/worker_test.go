@@ -54,6 +54,7 @@ type options struct {
 	configMode os.FileMode
 	infoJSON   string
 	imageExit  int
+	psOutput   string // container IDs printed by "docker ps"
 	goos       string
 	noDocker   bool
 	codexMode  os.FileMode
@@ -109,7 +110,7 @@ func newFixture(t *testing.T, o options) fixture {
 	bin := filepath.Join(root, "bin")
 	must(os.MkdirAll(bin, 0o755))
 	docker := filepath.Join(bin, "docker")
-	script := fmt.Sprintf("#!/bin/sh\ncase \"$1\" in\n info) printf '%%s\\n' '%s' ;;\n image) exit %d ;;\n *) exit 2 ;;\nesac\n", info, o.imageExit)
+	script := fmt.Sprintf("#!/bin/sh\ncase \"$1\" in\n info) printf '%%s\\n' '%s' ;;\n image) exit %d ;;\n context) printf '%%s\\n' 'unix:///run/user/1000/docker.sock' ;;\n ps) printf '%%s' '%s' ;;\n *) exit 2 ;;\nesac\n", info, o.imageExit, o.psOutput)
 	must(os.WriteFile(docker, []byte(script), 0o755))
 	if o.noDocker {
 		must(os.Remove(docker))
@@ -118,9 +119,13 @@ func newFixture(t *testing.T, o options) fixture {
 }
 
 func run(f fixture, args ...string) (int, string, string) {
+	return runEnv(f, nil, args...)
+}
+
+func runEnv(f fixture, extra []string, args ...string) (int, string, string) {
 	encoded, _ := json.Marshal(args)
 	cmd := exec.Command(os.Args[0], "-test.run=^TestWorkerChild$")
-	cmd.Env = []string{"HOME=" + f.Home, "PATH=" + f.Bin, "COMMONROOM_TEST_WORKER_ARGS=" + string(encoded)}
+	cmd.Env = append([]string{"HOME=" + f.Home, "PATH=" + f.Bin, "COMMONROOM_TEST_WORKER_ARGS=" + string(encoded)}, extra...)
 	var out, diag bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &diag
 	code := 0

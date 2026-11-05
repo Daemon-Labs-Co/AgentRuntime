@@ -61,6 +61,9 @@ replacing a file, keep timestamped backups, and accept `--dry-run`:
   controller account that an allowed action works and a plain command is refused.
 
 Run them from an administrator account. They are not run by automated tests.
+After the SSH setup, `deploy/verify-runtime.sh` (run as the controller account,
+read-only) checks `ready-v1`, `idle-v1`, `jobs-v2` and that plain and chained
+commands are refused, through the same route the controller uses.
 
 ## Use
 
