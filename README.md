@@ -24,8 +24,9 @@ Known debt:
   together.
 - `internal/taskcontract` and `internal/objectcustody` are application-domain
   contracts copied for now; they should become shared protocol types.
-- 722 of the application's worker-adjacent tests were not extracted because they
-  also exercise controller code; equivalent runtime-only tests are still to be written.
+- The other 722 test functions in the application package were not extracted
+  because they also exercise controller code. Runtime-only equivalents for any
+  worker behavior they cover are still to be written.
 
 Design and contracts live with the application:
 [separation design](../AgentChat/docs/technical/runtime-separation.md) and
