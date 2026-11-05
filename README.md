@@ -32,6 +32,21 @@ Design and contracts live with the application:
 [separation design](../AgentChat/docs/technical/runtime-separation.md) and
 [worker protocol](../AgentChat/docs/technical/worker-protocol.md).
 
+## SSH access for the controller
+
+`commonroom-ssh-gate` is the forced command for the worker account's
+`authorized_keys`. It accepts only `exec ~/.local/bin/commonroom-worker ACTION
+['VALUE']` with a known action and a base64url/hex value, then runs the installed
+worker directly with a fixed minimal environment. No shell is involved.
+
+```text
+command="/opt/commonroom-space/bin/commonroom-ssh-gate --worker /opt/commonroom-space/bin/commonroom-worker",restrict ssh-ed25519 AAAA... controller
+```
+
+Verified against a real sshd with a throwaway key: valid commands run, chained
+commands, plain shells and interactive sessions are refused. Port-forwarding
+refusal is documented by `restrict` but was not observed.
+
 ## Use
 
 ```bash
