@@ -79,3 +79,11 @@ func ValidImage(v string) bool {
 	_, err := hex.DecodeString(parts[1])
 	return err == nil
 }
+
+// WorkspaceProbeEvent is one lifecycle event in a workspace-probe journal. It
+// is shared by the controller's audit record and the worker's local journal.
+type WorkspaceProbeEvent struct {
+	Stage  string `json:"stage"`
+	ID     string `json:"id"`
+	Absent bool   `json:"absent"`
+}
