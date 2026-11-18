@@ -87,6 +87,10 @@ func decodeWorkerRequest(encoded string) (workerRunRequest, error) {
 // commands. Provider arguments must match the exact chat policy or the explicit
 // development policy bound to an approved snapshot. The worker independently
 // verifies its administrator-owned room registry before any launch.
+// workerModelPattern bounds a controller-chosen model name to one safe token; it
+// must match the controller's own pattern and can never start with a dash.
+var workerModelPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/-]{0,63}$`)
+
 func validateWorkerRun(v workerRunRequest) error {
 	if err := requireCredentialSeparatedDevelopment(v.Repository); err != nil {
 		return err
@@ -103,7 +107,7 @@ func validateWorkerRun(v workerRunRequest) error {
 	}
 	base := []string{}
 	suffix := []string{}
-	threadFlag := ""
+	threadFlag, modelFlag := "", ""
 	if v.Repository != "" && !repositoryDigestPattern.MatchString(v.Repository) {
 		return errors.New("Invalid development repository digest")
 	}
@@ -117,12 +121,16 @@ func validateWorkerRun(v workerRunRequest) error {
 	if v.Provider == "codex" {
 		suffix = []string{"-"}
 		threadFlag = "resume"
+		modelFlag = "-m"
 	} else {
 		threadFlag = "--resume"
+		modelFlag = "--model"
 	}
 
+	// Layout: base policy, optional "<model flag> <name>", optional
+	// "<thread flag> <id>", then the fixed suffix. Nothing else is accepted.
 	n := len(base) + len(suffix)
-	if len(v.Args) != n && len(v.Args) != n+2 {
+	if len(v.Args) < n || len(v.Args) > n+4 || (len(v.Args)-n)%2 != 0 {
 		return errors.New("Forbidden worker arguments")
 	}
 	for i, arg := range base {
@@ -135,11 +143,20 @@ func validateWorkerRun(v workerRunRequest) error {
 			return errors.New("Forbidden worker arguments")
 		}
 	}
-	if len(v.Args) == n+2 {
-		thread := v.Args[len(base)+1]
-		if v.Args[len(base)] != threadFlag || len(thread) > 128 || !regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]*$`).MatchString(thread) {
+	optional := v.Args[len(base) : len(v.Args)-len(suffix)]
+	if len(optional) >= 2 && optional[0] == modelFlag {
+		if !workerModelPattern.MatchString(optional[1]) {
+			return errors.New("Invalid worker model")
+		}
+		optional = optional[2:]
+	}
+	if len(optional) == 2 {
+		thread := optional[1]
+		if optional[0] != threadFlag || len(thread) > 128 || !regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]*$`).MatchString(thread) {
 			return errors.New("Invalid worker session")
 		}
+	} else if len(optional) != 0 {
+		return errors.New("Forbidden worker arguments")
 	}
 	return nil
 }
